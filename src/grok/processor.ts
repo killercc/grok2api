@@ -23,7 +23,8 @@ function makeChunk(
   model: string,
   content: string,
   finish_reason?: "stop" | "error" | null,
-): string {
+  search_results?: any,
+) {
   const payload: Record<string, unknown> = {
     id,
     object: "chat.completion.chunk",
@@ -34,6 +35,7 @@ function makeChunk(
         index: 0,
         delta: content ? { role: "assistant", content } : {},
         finish_reason: finish_reason ?? null,
+        web_search_results: search_results ?? null,
       },
     ],
   };
@@ -344,23 +346,23 @@ export function createOpenAiStreamFromGrokNdjson(
 
             if (thinkingFinished && currentIsThinking) continue;
 
-            if (grok.toolUsageCardId && grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
-              if (currentIsThinking) {
-                if (showThinking) {
-                  let appended = "";
-                  for (const r of grok.webSearchResults.results) {
-                    const title = typeof r.title === "string" ? r.title : "";
-                    const url = typeof r.url === "string" ? r.url : "";
-                    const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, "") : "";
-                    appended += `\n- [${title}](${url} \"${preview}\")`;
-                  }
-                  token += `${appended}\n`;
-                } else {
-                  continue;
-                }
-              } else {
-                continue;
+            if (grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
+              const rawWsr = grok.webSearchResults.results;
+              // Format for Markdown
+              let markdown = "\n\n> **Web Search Results:**\n";
+              for (let i = 0; i < rawWsr.length; i++) {
+                const r = rawWsr[i];
+                const title = typeof r.title === "string" ? r.title : "No Title";
+                const url = typeof r.url === "string" ? r.url : "#";
+                const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, " ").trim() : "";
+                markdown += `> ${i + 1}. [${title}](${url})\n`;
+                if (preview) markdown += `>    ${preview}\n`;
               }
+              markdown += "\n";
+
+              // Pass structured data in the same chunk
+              controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, markdown, null, rawWsr)));
+              continue;
             }
 
             let content = token;
@@ -417,6 +419,7 @@ export async function parseOpenAiFromGrokNdjson(
 
   let content = "";
   let model = requestedModel;
+  let web_search_results: any = null;
   for (const line of lines) {
     let data: GrokNdjson;
     try {
@@ -466,8 +469,24 @@ export async function parseOpenAiFromGrokNdjson(
         const imgUrl = toImgProxyUrl(global, origin, imgPath);
         content += `\n![Generated Image](${imgUrl})`;
       }
-      break;
     }
+
+    if (grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
+      web_search_results = grok.webSearchResults.results;
+      let markdown = "\n\n> **Web Search Results:**\n";
+      for (let i = 0; i < web_search_results.length; i++) {
+        const r = web_search_results[i];
+        const title = typeof r.title === "string" ? r.title : "No Title";
+        const url = typeof r.url === "string" ? r.url : "#";
+        const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, " ").trim() : "";
+        markdown += `> ${i + 1}. [${title}](${url})\n`;
+        if (preview) markdown += `>    ${preview}\n`;
+      }
+      markdown += "\n";
+      content += markdown;
+    }
+
+    if (urls.length) break;
 
     // If upstream emits placeholder/empty generatedImageUrls in intermediate frames, keep scanning.
     if (Array.isArray(rawUrls)) continue;
@@ -484,7 +503,7 @@ export async function parseOpenAiFromGrokNdjson(
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content },
+        message: { role: "assistant", content, web_search_results },
         finish_reason: "stop",
       },
     ],
