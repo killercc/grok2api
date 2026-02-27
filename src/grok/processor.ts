@@ -256,6 +256,28 @@ export function createOpenAiStreamFromGrokNdjson(
             const userRespModel = grok.userResponse?.model;
             if (typeof userRespModel === "string" && userRespModel.trim()) currentModel = userRespModel.trim();
 
+            // Web search results handling (path C: modelResponse.webSearchResults is the most complete)
+            if (!wsr_sent && grok.modelResponse?.webSearchResults && Array.isArray(grok.modelResponse.webSearchResults)) {
+              const rawWsr = grok.modelResponse.webSearchResults;
+              if (rawWsr.length > 0) {
+                wsr_sent = true;
+                // Format for Markdown
+                let markdown = "\n\n> **Web Search Results:**\n";
+                for (let i = 0; i < rawWsr.length; i++) {
+                  const r = rawWsr[i];
+                  const title = typeof r.title === "string" ? r.title : "No Title";
+                  const url = typeof r.url === "string" ? r.url : "#";
+                  const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, " ").trim() : "";
+                  markdown += `> ${i + 1}. [${title}](${url})\n`;
+                  if (preview) markdown += `>    ${preview}\n`;
+                }
+                markdown += "\n";
+
+                // Pass structured data in the same chunk
+                controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, markdown, null, rawWsr)));
+              }
+            }
+
             // Video generation stream
             const videoResp = grok.streamingVideoGenerationResponse;
             if (videoResp) {
