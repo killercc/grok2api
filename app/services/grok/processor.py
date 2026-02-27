@@ -46,6 +46,7 @@ class BaseProcessor:
         self.created = int(time.time())
         self.app_url = get_config("app.app_url", "")
         self._dl_service: Optional[DownloadService] = None
+        self.wsr_sent: bool = False
 
     def _get_dl(self) -> DownloadService:
         """获取下载服务实例（复用）"""
@@ -82,7 +83,28 @@ class BaseProcessor:
             return f"{self.app_url.rstrip('/')}{local_path}"
         return local_path
             
-    def _sse(self, content: str = "", role: str = None, finish: str = None) -> str:
+    def _format_search_results(self, results: Any) -> str:
+        """格式化网页搜索结果为 Markdown"""
+        if not results:
+            return ""
+        if isinstance(results, dict):
+            results = results.get("results", [])
+        if not isinstance(results, list) or not results:
+            return ""
+        markdown = "\n\n> **Web Search Results:**\n"
+        for i, res in enumerate(results, 1):
+            title = res.get("title", "No Title")
+            url = res.get("url", "#")
+            preview = res.get("preview", "") # 不再限制长度
+            markdown += f"> {i}. [{title}]({url})\n"
+            if preview:
+                # 仅保留换行符处理，不截断内容
+                p = preview.replace("\n", " ").strip()
+                markdown += f">    {p}\n"
+        markdown += "\n"
+        return markdown
+
+    def _sse(self, content: str = "", role: str = None, finish: str = None, search_results: Any = None) -> str:
         """构建 SSE 响应 (StreamProcessor 通用)"""
         if not hasattr(self, 'response_id'):
             self.response_id = None
@@ -90,20 +112,24 @@ class BaseProcessor:
             self.fingerprint = ""
             
         delta = {}
-        if role:
-            delta["role"] = role
-            delta["content"] = ""
-        elif content:
-            delta["content"] = content
+        if role: delta["role"] = role
+        elif content: delta["content"] = content
         
         chunk = {
             "id": self.response_id or f"chatcmpl-{uuid.uuid4().hex[:24]}",
             "object": "chat.completion.chunk",
             "created": self.created,
             "model": self.model,
-            "system_fingerprint": self.fingerprint if hasattr(self, 'fingerprint') else "",
-            "choices": [{"index": 0, "delta": delta, "logprobs": None, "finish_reason": finish}]
+            "choices": [{
+                "index": 0, 
+                "delta": delta, 
+                "finish_reason": finish
+            }]
         }
+        # 如果有搜索结果，放入 choices[0] 中供客户端提取
+        if search_results:
+            chunk["choices"][0]["web_search_results"] = search_results
+
         return f"data: {orjson.dumps(chunk).decode()}\n\n"
 
 
@@ -143,6 +169,15 @@ class StreamProcessor(BaseProcessor):
                 if rid := resp.get("responseId"):
                     self.response_id = rid
                 
+                # 状态与搜索结果 (Top-level)
+                if not self.wsr_sent:
+                    if wsr := resp.get("webSearchResults"):
+                        # 提取原始数据列表
+                        raw_wsr = wsr.get("results", []) if isinstance(wsr, dict) else wsr
+                        # 同时发送 Markdown 内容和 结构化 JSON 数据
+                        yield self._sse(self._format_search_results(raw_wsr), search_results=raw_wsr)
+                        self.wsr_sent = True
+                
                 # 首次发送 role
                 if not self.role_sent:
                     yield self._sse(role="assistant")
@@ -166,6 +201,15 @@ class StreamProcessor(BaseProcessor):
                             yield self._sse(msg + "\n")
                         yield self._sse("</think>\n")
                         self.think_opened = False
+                    
+                    # 搜索结果 (Inside modelResponse)
+                    if not self.wsr_sent:
+                        if wsr := mr.get("webSearchResults"):
+                            # 提取原始数据列表
+                            raw_wsr = wsr.get("results", []) if isinstance(wsr, dict) else wsr
+                            # 同时发送 Markdown 内容和 结构化 JSON 数据
+                            yield self._sse(self._format_search_results(raw_wsr), search_results=raw_wsr)
+                            self.wsr_sent = True
                     
                     # 处理生成的图片
                     for url in mr.get("generatedImageUrls", []):
@@ -216,6 +260,7 @@ class CollectProcessor(BaseProcessor):
         response_id = ""
         fingerprint = ""
         content = ""
+        raw_wsr_data = None
         
         try:
             async for line in response:
@@ -234,6 +279,11 @@ class CollectProcessor(BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     response_id = mr.get("responseId", "")
                     content = mr.get("message", "")
+                    
+                    # 搜索结果
+                    if wsr := mr.get("webSearchResults"):
+                        raw_wsr_data = wsr.get("results", []) if isinstance(wsr, dict) else wsr
+                        content += self._format_search_results(raw_wsr_data)
                     
                     if urls := mr.get("generatedImageUrls"):
                         content += "\n"
@@ -269,7 +319,13 @@ class CollectProcessor(BaseProcessor):
             "system_fingerprint": fingerprint,
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": content, "refusal": None, "annotations": []},
+                "message": {
+                    "role": "assistant", 
+                    "content": content, 
+                    "refusal": None, 
+                    "annotations": [],
+                    "web_search_results": raw_wsr_data
+                },
                 "finish_reason": "stop"
             }],
             "usage": {
