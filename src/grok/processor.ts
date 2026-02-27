@@ -170,6 +170,7 @@ export function createOpenAiStreamFromGrokNdjson(
       let thinkingFinished = false;
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
+      let wsr_sent = false;
 
       let buffer = "";
 
@@ -346,23 +347,26 @@ export function createOpenAiStreamFromGrokNdjson(
 
             if (thinkingFinished && currentIsThinking) continue;
 
-            if (grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
-              const rawWsr = grok.webSearchResults.results;
-              // Format for Markdown
-              let markdown = "\n\n> **Web Search Results:**\n";
-              for (let i = 0; i < rawWsr.length; i++) {
-                const r = rawWsr[i];
-                const title = typeof r.title === "string" ? r.title : "No Title";
-                const url = typeof r.url === "string" ? r.url : "#";
-                const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, " ").trim() : "";
-                markdown += `> ${i + 1}. [${title}](${url})\n`;
-                if (preview) markdown += `>    ${preview}\n`;
-              }
-              markdown += "\n";
+            // Web search results handling (path C: modelResponse.webSearchResults is the most complete)
+            if (!wsr_sent && grok.modelResponse?.webSearchResults && Array.isArray(grok.modelResponse.webSearchResults)) {
+              const rawWsr = grok.modelResponse.webSearchResults;
+              if (rawWsr.length > 0) {
+                wsr_sent = true;
+                // Format for Markdown
+                let markdown = "\n\n> **Web Search Results:**\n";
+                for (let i = 0; i < rawWsr.length; i++) {
+                  const r = rawWsr[i];
+                  const title = typeof r.title === "string" ? r.title : "No Title";
+                  const url = typeof r.url === "string" ? r.url : "#";
+                  const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, " ").trim() : "";
+                  markdown += `> ${i + 1}. [${title}](${url})\n`;
+                  if (preview) markdown += `>    ${preview}\n`;
+                }
+                markdown += "\n";
 
-              // Pass structured data in the same chunk
-              controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, markdown, null, rawWsr)));
-              continue;
+                // Pass structured data in the same chunk
+                controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, markdown, null, rawWsr)));
+              }
             }
 
             let content = token;
@@ -471,19 +475,25 @@ export async function parseOpenAiFromGrokNdjson(
       }
     }
 
-    if (grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
-      web_search_results = grok.webSearchResults.results;
-      let markdown = "\n\n> **Web Search Results:**\n";
-      for (let i = 0; i < web_search_results.length; i++) {
-        const r = web_search_results[i];
-        const title = typeof r.title === "string" ? r.title : "No Title";
-        const url = typeof r.url === "string" ? r.url : "#";
-        const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, " ").trim() : "";
-        markdown += `> ${i + 1}. [${title}](${url})\n`;
-        if (preview) markdown += `>    ${preview}\n`;
+    // Extract structured search results from modelResponse path
+    if (grok.modelResponse?.webSearchResults && Array.isArray(grok.modelResponse.webSearchResults)) {
+      const wsr = grok.modelResponse.webSearchResults;
+      if (wsr.length > 0) {
+        web_search_results = wsr;
+        let markdown = "\n\n> **Web Search Results:**\n";
+        for (let i = 0; i < wsr.length; i++) {
+          const r = wsr[i];
+          const title = typeof r.title === "string" ? r.title : "No Title";
+          const url = typeof r.url === "string" ? r.url : "#";
+          const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, " ").trim() : "";
+          markdown += `> ${i + 1}. [${title}](${url})\n`;
+          if (preview) markdown += `>    ${preview}\n`;
+        }
+        markdown += "\n";
+        if (!content.includes("> **Web Search Results:**")) {
+          content += markdown;
+        }
       }
-      markdown += "\n";
-      content += markdown;
     }
 
     if (urls.length) break;
